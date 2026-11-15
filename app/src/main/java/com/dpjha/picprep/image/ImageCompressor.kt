@@ -11,7 +11,11 @@ import android.os.Build
 import androidx.exifinterface.media.ExifInterface
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import java.io.ByteArrayInputStream
 import java.io.ByteArrayOutputStream
+import java.io.FileNotFoundException
+import java.io.IOException
+import android.os.ParcelFileDescriptor
 import kotlin.math.max
 import kotlin.math.min
 
@@ -44,8 +48,10 @@ class ImageCompressor(private val resolver: ContentResolver) {
     ): ProcessedImage = withContext(Dispatchers.IO) {
         require(quality in 10..100) { "Quality must be between 10 and 100." }
         require(targetBytes == null || targetBytes >= 5 * 1024) { "Target size must be at least 5 KB." }
-        val sourceSize = resolver.openAssetFileDescriptor(uri, "r")?.use { it.length }?.takeIf { it > 0 } ?: 0L
-        val original = decodeOriented(uri)
+        // Snapshot the provider stream once; Photo Picker/cloud streams may not reopen reliably.
+        val sourceBytes = readImageBytes(uri)
+        val sourceSize = sourceBytes.size.toLong()
+        val original = decodeOriented(sourceBytes, uri)
         val originalW = original.width; val originalH = original.height
         var working = original
         if (width != null || height != null || maxDimension != null) {
@@ -125,15 +131,57 @@ class ImageCompressor(private val resolver: ContentResolver) {
         ProcessedImage(bytes, outputWidth, outputHeight, format, q, sourceSize, originalW, originalH, reached)
     }
 
-    private fun decodeOriented(uri: Uri): Bitmap {
+    private fun readImageBytes(uri: Uri): ByteArray {
+        var lastFailure: Throwable? = null
+        try {
+            resolver.openInputStream(uri)?.use { stream ->
+                val bytes = stream.readBytes()
+                if (bytes.isNotEmpty()) return bytes
+                lastFailure = IOException("The selected image is empty.")
+            }
+        } catch (t: Throwable) { lastFailure = t }
+
+        // Some providers expose an AssetFileDescriptor even when openInputStream returns null.
+        try {
+            resolver.openAssetFileDescriptor(uri, "r")?.use { descriptor ->
+                val bytes = descriptor.createInputStream().use { it.readBytes() }
+                if (bytes.isNotEmpty()) return bytes
+                lastFailure = IOException("The selected image is empty.")
+            }
+        } catch (t: Throwable) { lastFailure = t }
+
+        // Final fallback for providers that expose only a raw file descriptor.
+        try {
+            resolver.openFileDescriptor(uri, "r")?.use { descriptor ->
+                val bytes = ParcelFileDescriptor.AutoCloseInputStream(descriptor).use { it.readBytes() }
+                if (bytes.isNotEmpty()) return bytes
+                lastFailure = IOException("The selected image is empty.")
+            }
+        } catch (t: Throwable) { lastFailure = t }
+
+        val mime = runCatching { resolver.getType(uri) }.getOrNull()
+        val details = "scheme=${uri.scheme ?: "unknown"}, type=${mime ?: "unknown"}"
+        throw IOException(
+            "PicPrep could not read the selected image ($details). Please choose it again or select a locally stored copy.",
+            lastFailure ?: FileNotFoundException("No readable stream or file descriptor was returned.")
+        )
+    }
+
+    private fun decodeOriented(sourceBytes: ByteArray, uri: Uri): Bitmap {
         val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
-        resolver.openInputStream(uri)?.use { BitmapFactory.decodeStream(it, null, bounds) } ?: error("Unable to open image.")
-        require(bounds.outWidth > 0 && bounds.outHeight > 0) { "Unsupported or invalid image." }
+        BitmapFactory.decodeByteArray(sourceBytes, 0, sourceBytes.size, bounds)
+        require(bounds.outWidth > 0 && bounds.outHeight > 0) {
+            val mime = runCatching { resolver.getType(uri) }.getOrNull()
+            "Unsupported or invalid image${mime?.let { " ($it)" } ?: ""}."
+        }
         var sample = 1
         while (max(bounds.outWidth / sample, bounds.outHeight / sample) > 4096) sample *= 2
-        val opts = BitmapFactory.Options().apply { inSampleSize = sample; inPreferredConfig = Bitmap.Config.ARGB_8888 }
-        val decoded = resolver.openInputStream(uri)?.use { BitmapFactory.decodeStream(it, null, opts) } ?: error("Unable to decode image.")
-        val orientation = runCatching { resolver.openInputStream(uri)?.use { ExifInterface(it).getAttributeInt(ExifInterface.TAG_ORIENTATION, ExifInterface.ORIENTATION_NORMAL) } }.getOrDefault(ExifInterface.ORIENTATION_NORMAL)
+        val options = BitmapFactory.Options().apply { inSampleSize = sample; inPreferredConfig = Bitmap.Config.ARGB_8888 }
+        val decoded = BitmapFactory.decodeByteArray(sourceBytes, 0, sourceBytes.size, options)
+            ?: throw IOException("Android could not decode this image. Try another JPEG, PNG or WebP file.")
+        val orientation = runCatching {
+            ExifInterface(ByteArrayInputStream(sourceBytes)).getAttributeInt(ExifInterface.TAG_ORIENTATION, ExifInterface.ORIENTATION_NORMAL)
+        }.getOrDefault(ExifInterface.ORIENTATION_NORMAL)
         val matrix = Matrix().apply {
             when (orientation) {
                 ExifInterface.ORIENTATION_ROTATE_90 -> postRotate(90f)
@@ -145,6 +193,7 @@ class ImageCompressor(private val resolver: ContentResolver) {
                 ExifInterface.ORIENTATION_TRANSVERSE -> { postScale(-1f, 1f); postRotate(270f) }
             }
         }
-        return if (matrix.isIdentity) decoded else Bitmap.createBitmap(decoded, 0, 0, decoded.width, decoded.height, matrix, true).also { if (it !== decoded) decoded.recycle() }
+        return if (matrix.isIdentity) decoded else Bitmap.createBitmap(decoded, 0, 0, decoded.width, decoded.height, matrix, true)
+            .also { if (it !== decoded) decoded.recycle() }
     }
 }
