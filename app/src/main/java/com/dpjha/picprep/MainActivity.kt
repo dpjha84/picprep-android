@@ -1,5 +1,8 @@
 package com.dpjha.picprep
 
+import android.content.Intent
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
 import android.net.Uri
 import android.os.Bundle
 import androidx.activity.ComponentActivity
@@ -7,6 +10,7 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -14,6 +18,8 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.CheckCircle
 import androidx.compose.material.icons.rounded.Image
+import androidx.compose.material.icons.rounded.OpenInNew
+import androidx.compose.material.icons.rounded.Share
 import androidx.compose.material.icons.rounded.PhotoLibrary
 import androidx.compose.material.icons.rounded.SaveAlt
 import androidx.compose.material3.*
@@ -21,11 +27,14 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.lifecycleScope
 import com.dpjha.picprep.data.ImagePreset
 import com.dpjha.picprep.data.ImageSaver
+import com.dpjha.picprep.data.SavedImage
 import com.dpjha.picprep.data.PresetStore
 import com.dpjha.picprep.image.ImageCompressor
 import com.dpjha.picprep.image.OutputFormat
@@ -67,6 +76,8 @@ private fun PicPrepApp() {
     var status by remember { mutableStateOf<String?>(null) }
     var error by remember { mutableStateOf<String?>(null) }
     var outputs by remember { mutableStateOf<List<ProcessedImage>>(emptyList()) }
+    var savedOutputs by remember { mutableStateOf<Map<Int, SavedImage>>(emptyMap()) }
+    var previewIndex by remember { mutableStateOf<Int?>(null) }
     var presetName by remember { mutableStateOf("") }
     var showPresetDialog by remember { mutableStateOf(false) }
     var showPresets by remember { mutableStateOf(false) }
@@ -90,7 +101,7 @@ private fun PicPrepApp() {
         if (mode == ToolMode.RESIZE && (w == null || h == null || w !in 1..12000 || h !in 1..12000)) { error = "Enter valid dimensions between 1 and 12,000 pixels."; return }
         if (mode == ToolMode.BATCH && (kb == null || kb < 5)) { error = "Enter a target size of at least 5 KB for batch processing."; return }
         if ((mode == ToolMode.BATCH || mode == ToolMode.COMPRESS) && (maxPx == null || maxPx !in 1..12000)) { error = "Enter a maximum dimension between 1 and 12,000 pixels."; return }
-        busy = true; error = null; status = null; outputs = emptyList()
+        busy = true; error = null; status = null; outputs = emptyList(); savedOutputs = emptyMap(); previewIndex = null
         activity.lifecycleScope.launch {
             try {
                 val engine = ImageCompressor(context.contentResolver)
@@ -166,20 +177,77 @@ private fun PicPrepApp() {
                 error?.let { Text(it, color = MaterialTheme.colorScheme.error) }
                 status?.let { Text(it, color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.Medium) }
                 if (outputs.isNotEmpty()) {
-                    Card(shape = RoundedCornerShape(20.dp)) {
-                        Column(Modifier.fillMaxWidth().padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                            Row(verticalAlignment = Alignment.CenterVertically) { Icon(Icons.Rounded.CheckCircle, null, tint = MaterialTheme.colorScheme.primary); Spacer(Modifier.width(8.dp)); Text("Ready to save", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold) }
-                            outputs.forEachIndexed { i, out ->
-                                HorizontalDivider()
-                                Text("Image ${i + 1} · ${out.width} × ${out.height} · ${out.format.label}", style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.SemiBold)
-                                Text("${formatBytes(out.bytes.size.toLong())}${if (out.targetReached) " · Target met" else " · Best effort"}", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                                Button(onClick = { scope.launch { try { ImageSaver(context).save(out.bytes, out.format); status = "Saved image ${i + 1} to Pictures/PicPrep." } catch (t: Throwable) { error = t.message ?: "Save failed." } } }, modifier = Modifier.fillMaxWidth()) { Icon(Icons.Rounded.SaveAlt, null); Spacer(Modifier.width(6.dp)); Text("Save image ${i + 1}") }
+                    Card(shape = RoundedCornerShape(24.dp)) {
+                        Column(Modifier.fillMaxWidth().padding(16.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Icon(Icons.Rounded.CheckCircle, null, tint = MaterialTheme.colorScheme.primary)
+                                Spacer(Modifier.width(8.dp))
+                                Text("Prepared images", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
                             }
-                            if (outputs.size > 1) OutlinedButton(onClick = { scope.launch { try { outputs.forEach { ImageSaver(context).save(it.bytes, it.format) }; status = "All ${outputs.size} images saved to Pictures/PicPrep." } catch (t: Throwable) { error = t.message ?: "Batch save failed." } } }, modifier = Modifier.fillMaxWidth()) { Text("Save all images") }
+                            outputs.forEachIndexed { i, out ->
+                                val thumbnail = remember(out.bytes) { decodePreviewBitmap(out.bytes)?.asImageBitmap() }
+                                val saved = savedOutputs[i]
+                                HorizontalDivider()
+                                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                                    Surface(modifier = Modifier.size(88.dp), shape = RoundedCornerShape(14.dp), color = MaterialTheme.colorScheme.surfaceVariant) {
+                                        if (thumbnail != null) Image(bitmap = thumbnail, contentDescription = "Prepared image preview", modifier = Modifier.fillMaxSize(), contentScale = ContentScale.Crop)
+                                        else Icon(Icons.Rounded.Image, null, modifier = Modifier.padding(24.dp))
+                                    }
+                                    Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
+                                        Text("Image " + (i + 1), style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+                                        Text(out.width.toString() + " × " + out.height + " · " + out.format.label, style = MaterialTheme.typography.bodySmall)
+                                        Text(formatBytes(out.bytes.size.toLong()), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                        if (saved != null) Text("Saved", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.primary)
+                                        TextButton(onClick = { previewIndex = i }, contentPadding = PaddingValues(0.dp)) { Text("Preview") }
+                                    }
+                                }
+                                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                    Button(onClick = { scope.launch { try {
+                                        val result = ImageSaver(context).save(out.bytes, out.format)
+                                        savedOutputs = savedOutputs + (i to result)
+                                        status = "Saved to Pictures/PicPrep."; error = null
+                                    } catch (t: Exception) { error = t.message ?: "Could not save image." } } }, modifier = Modifier.weight(1f)) {
+                                        Icon(Icons.Rounded.SaveAlt, null); Spacer(Modifier.width(6.dp)); Text(if (saved == null) "Save" else "Save again")
+                                    }
+                                    if (saved != null) {
+                                        OutlinedButton(onClick = { try {
+                                            val viewIntent = Intent(Intent.ACTION_VIEW).apply { setDataAndType(saved.uri, out.format.mime); addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION) }
+                                            context.startActivity(Intent.createChooser(viewIntent, "Open prepared image"))
+                                        } catch (t: Exception) { error = "No compatible image viewer was found." } }, modifier = Modifier.weight(1f)) {
+                                            Icon(Icons.Rounded.OpenInNew, null); Spacer(Modifier.width(4.dp)); Text("Open")
+                                        }
+                                        OutlinedButton(onClick = {
+                                            val shareIntent = Intent(Intent.ACTION_SEND).apply { type = out.format.mime; putExtra(Intent.EXTRA_STREAM, saved.uri); clipData = android.content.ClipData.newUri(context.contentResolver, "Prepared image", saved.uri); addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION) }
+                                            context.startActivity(Intent.createChooser(shareIntent, "Share image"))
+                                        }, modifier = Modifier.weight(1f)) { Icon(Icons.Rounded.Share, null); Spacer(Modifier.width(4.dp)); Text("Share") }
+                                    }
+                                }
+                            }
                         }
                     }
                 }
                 Text("PicPrep · Make every image fit.", modifier = Modifier.align(Alignment.CenterHorizontally), style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+        }
+    }
+    previewIndex?.let { index ->
+        outputs.getOrNull(index)?.let { image ->
+            val bitmap = remember(image.bytes) { decodePreviewBitmap(image.bytes, 1600)?.asImageBitmap() }
+            androidx.compose.ui.window.Dialog(onDismissRequest = { previewIndex = null }) {
+                Surface(shape = RoundedCornerShape(24.dp), color = MaterialTheme.colorScheme.surface) {
+                    Column(Modifier.fillMaxWidth().padding(18.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                        Text("Preview", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
+                        if (bitmap != null) Image(bitmap = bitmap, contentDescription = "Full prepared image", modifier = Modifier.fillMaxWidth().heightIn(max = 480.dp), contentScale = ContentScale.Fit)
+                        Text(image.width.toString() + " × " + image.height + " · " + formatBytes(image.bytes.size.toLong()), style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        Button(onClick = { scope.launch { try {
+                            val saved = ImageSaver(context).save(image.bytes, image.format)
+                            savedOutputs = savedOutputs + (index to saved)
+                            previewIndex = null; status = "Saved to Pictures/PicPrep."; error = null
+                        } catch (t: Exception) { error = t.message ?: "Could not save image." } } }, modifier = Modifier.fillMaxWidth()) {
+                            Icon(Icons.Rounded.SaveAlt, null); Spacer(Modifier.width(6.dp)); Text("Save image")
+                        }
+                    }
+                }
             }
         }
     }
@@ -195,3 +263,16 @@ private fun PicPrepApp() {
 }
 
 private fun formatBytes(bytes: Long): String = if (bytes >= 1024 * 1024) String.format(Locale.US, "%.2f MB", bytes / (1024f * 1024f)) else String.format(Locale.US, "%.1f KB", bytes / 1024f)
+
+private fun decodePreviewBitmap(bytes: ByteArray, maxDimension: Int = 320): Bitmap? {
+    if (bytes.isEmpty()) return null
+    val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+    BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)
+    if (bounds.outWidth <= 0 || bounds.outHeight <= 0) return null
+    var sample = 1
+    while (maxOf(bounds.outWidth / sample, bounds.outHeight / sample) > maxDimension) sample *= 2
+    return BitmapFactory.decodeByteArray(bytes, 0, bytes.size, BitmapFactory.Options().apply {
+        inSampleSize = sample
+        inPreferredConfig = Bitmap.Config.ARGB_8888
+    })
+}
