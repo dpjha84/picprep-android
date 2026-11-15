@@ -1,6 +1,7 @@
 package com.dpjha.picprep
 
 import android.content.Intent
+import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.net.Uri
 import android.os.Bundle
@@ -184,7 +185,7 @@ private fun PicPrepApp() {
                                 Text("Prepared images", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
                             }
                             outputs.forEachIndexed { i, out ->
-                                val thumbnail = remember(out.bytes) { BitmapFactory.decodeByteArray(out.bytes, 0, out.bytes.size)?.asImageBitmap() }
+                                val thumbnail = remember(out.bytes) { decodePreviewBitmap(out.bytes)?.asImageBitmap() }
                                 val saved = savedOutputs[i]
                                 HorizontalDivider()
                                 Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
@@ -231,7 +232,7 @@ private fun PicPrepApp() {
     }
     previewIndex?.let { index ->
         outputs.getOrNull(index)?.let { image ->
-            val bitmap = remember(image.bytes) { BitmapFactory.decodeByteArray(image.bytes, 0, image.bytes.size)?.asImageBitmap() }
+            val bitmap = remember(image.bytes) { decodePreviewBitmap(image.bytes, 1600)?.asImageBitmap() }
             androidx.compose.ui.window.Dialog(onDismissRequest = { previewIndex = null }) {
                 Surface(shape = RoundedCornerShape(24.dp), color = MaterialTheme.colorScheme.surface) {
                     Column(Modifier.fillMaxWidth().padding(18.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
@@ -262,3 +263,16 @@ private fun PicPrepApp() {
 }
 
 private fun formatBytes(bytes: Long): String = if (bytes >= 1024 * 1024) String.format(Locale.US, "%.2f MB", bytes / (1024f * 1024f)) else String.format(Locale.US, "%.1f KB", bytes / 1024f)
+
+private fun decodePreviewBitmap(bytes: ByteArray, maxDimension: Int = 320): Bitmap? {
+    if (bytes.isEmpty()) return null
+    val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+    BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)
+    if (bounds.outWidth <= 0 || bounds.outHeight <= 0) return null
+    var sample = 1
+    while (maxOf(bounds.outWidth / sample, bounds.outHeight / sample) > maxDimension) sample *= 2
+    return BitmapFactory.decodeByteArray(bytes, 0, bytes.size, BitmapFactory.Options().apply {
+        inSampleSize = sample
+        inPreferredConfig = Bitmap.Config.ARGB_8888
+    })
+}
