@@ -28,16 +28,20 @@ jobs:
           java-version: '17'
 
       - name: Set up Android SDK
-        uses: android-actions/setup-android@v4
+        uses: android-actions/setup-android@v3
+        with:
+          packages: 'platform-tools platforms;android-36 build-tools;36.0.0'
 
-      - name: Set up Gradle
+      - name: Set up Gradle 8.13
         uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.13'
 
-      - name: Grant execute permission for gradlew
-        run: chmod +x gradlew
+      - name: Verify Gradle
+        run: gradle --version
 
       - name: Build debug APK, release APK and release AAB
-        run: ./gradlew --no-daemon clean assembleDebug assembleRelease bundleRelease
+        run: gradle --no-daemon clean assembleDebug assembleRelease bundleRelease
 
       - name: Upload debug APK
         uses: actions/upload-artifact@v4
@@ -47,7 +51,7 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
-      - name: Upload release APK
+      - name: Upload release APK (unsigned unless signing is configured)
         uses: actions/upload-artifact@v4
         with:
           name: PicPrep-release-apk
@@ -55,7 +59,7 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
-      - name: Upload release AAB
+      - name: Upload release AAB (unsigned unless signing is configured)
         uses: actions/upload-artifact@v4
         with:
           name: PicPrep-release-aab
